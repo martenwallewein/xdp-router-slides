@@ -115,9 +115,8 @@
     -->
     <div class="step slide title" data-x="-2200" data-y="-3000">
         <h1>
-            XDP, AF_XDP, eBPF and the SCION Border Router </h1>
-        <h5 class="fixed-title">+ Short HSR Deployment Update</h5>
-        <h2>Marten Gartner, Lars-Christian Schulz, David Hausheer</h2>
+           Thoughts about speeding up the SCION Border Router </h1>
+        <h2>Marten Gartner</h2>
         <h3>2021</h3>
 
         <div class="notes">
@@ -159,7 +158,7 @@
                 <li>No updates of changes, no chance to look in the source</li>
                 <li>Also not all features of SCIONLab covered</li>
             </ul>
-            <li>Therefor: We think about to do an add-on to Border Router to speed up certain data paths</li>
+            <li style="margin-top: 32px"><b>We think about to do an add-on to Border Router to speed up certain data paths</b></li>
         </ul>
 
         <div class="notes">
@@ -174,7 +173,7 @@
         </div>
         <ul>
             <li>Filter for SCION/UDP packets with path type SCION</li>
-            <li>There are forwarded in the kernel, the rest is passed to the OSR</li>
+            <li>These are forwarded in the kernel, the rest is passed to the OSR</li>
         </ul>
 
         <div class="notes">
@@ -198,15 +197,10 @@
     <div class="step slide">
         <h1>How to get SpeedUp?</h1>
         <ul>
-            <li>Bypass Linux kernel using XDP entrypoint</li>
-            <li>eBPF provides the hook to XDP and runs code in the kernel</li>
+            <li>Bypass Linux kernel using XDP entrypoint via eBPF, run code in the Kernel</li>
             <li>This code can write in packets and return an action (DROP, PASS, TX, etc)</li>
-            <li>This is fast:</li>
-            <ul>
-                <li>Drop 26M pps on a single core ()</li>
-                <li>Forward 28M pps with 5 cores ()</li>
-            </ul>
-            <li>So: We use XDP, we're done, it's fast... except for:</li>
+            <li>This is fast: Drop 26M pps on a single core ()</li>
+            <li style="margin-top: 3em;"><b>So: We use XDP, we're done, it's fast... except for:</b></li>
             <ul>
                 <li><b>The eBPF programs attached to XDP need to be very short and lightweight to be fast for a single flow...</b></li>
             </ul>
@@ -218,19 +212,13 @@
     <div class="step slide">
         <h1>Single Flow - Single Core Problem</h1>
         <div class="img-container">
-        <img src="images/scion-dispatcher.jpg" 
-        alt="SCION BT setup" class="fullscreen-img" style="width: 0%; height: 0%;"/>
+        <img src="images/xdp-router-flow.jpg" 
+        alt="SCION BT setup" class="fullscreen-img" style="width: 60%" />
         </div>
         <ul>
-            <li>TOOD: Figure! A queue is mostly bound to a CPU</li>
-            <li>This means each packet arriving at the queue is handled by the CPU</li>
-        <li>The NIC normally decides to which queue a packet is sent by a 5 tuple (flow)</li>
-        <ul>
-               <li> - src/dest addr and src/dest port, L4 proto</li>
-        </ul>
-        <li>So a single flow (forwarding between two Border Routers) always ends up at the same CPU </li>
+        <li>A single flow (forwarding between two Border Routers) always ends up at the same CPU </li>
         <li>Meaning: No parallelism for a single flow</li>
-        <li>Fun fact: This is exactly the same point why the HSR of Anapaya is limited</li>
+        <li>Fun fact: This is exactly the same point where the HSR of Anapaya is limited</li>
         </ul>
 
         <div class="notes">
@@ -239,32 +227,39 @@
     <div class="step slide">
         <h1>With AES, forwarding is not "lightweight"</h1>
         <ul>
-            <li>With AES not using asm intrinsics, there is a lot of work to do to verify hop fields</li>
-            <li>So what can we do:</li>
+            <li>With AES not using intrinsics, there is a lot of work to do to verify hop fields</li>
+            <li style="margin-top: 1em;"><b>Idea #1: RSS - Receive Side Scaling</b></li>
             <ul>
-            <li>- RSS: Receive Side Scaling</li>
-            <ul>
-                <li>- We change the 5 tuple to distribute packets over multiple flows (limited to particular NICs)</li>
-                <li>- We add source port randomization in the routers, so that we have different 5 tuples (this is open at anapaya since months...)</li>
+                <li>We change the hash function in the NIC (limited to particular NICs)</li>
+                <li>We add source port randomization in the routers, so that we have different 5 tuples (this is open at anapaya since months...)</li>
             </ul>
-            <li>- We check this thing called AF_XDP</li>
-            </ul>
-            
-
+            <li style="margin-top: 1em;"><b>Idea #2: We check this thing called AF_XDP</b></li>
         </ul>
 
         <div class="notes">
         </div>
     </div>
     <div class="step slide">
-        <h1>Receiver side: Packet rewriting</h1>
+        <h1>AF_XDP based forwarding</h1>
         <div class="img-container">
-        <img src="images/scion-port-rewrite.jpg" 
-        alt="SCION BT setup" class="fullscreen-img" style="width: 40%"/>
+            <img src="images/xdp-router-afxdp.jpg" 
+            alt="SCION BT setup" class="fullscreen-img" style="width: 30%"/>
         </div>
         <ul>
-            <li>BPF app opens packets containing the UDP TargetPort of the dispatcher</li>
-            <li>Lookup L4 SCION UDP dest, write into UDP TargetPort</li>
+            <li>No restricted instruction set, no verifier, use intrinsics</li>
+            <li>And we may enable multithreading for a single flow, so in theory we could be faster than the HSR :)</li>
+        </ul>
+
+        <div class="notes">
+        </div>
+    </div>
+    <div class="step slide">
+        <h1>Further Performance Booster: Hop field caching</h1>
+        <ul>
+            <li>In our experiments, routers often forward packets containing the same SCION headers (e.g. bulk transfer of data over a path)</li>
+            <li>We could create a cache that contains the n last verified hop fields</li>
+            <li>We look in the cache and in case of a hit, we skip verification</li>
+            <li>Performing a lookup in a (small) cache is potentially faster than doing AES verification </li>
         </ul>
 
         <div class="notes">
@@ -392,7 +387,7 @@
         <div class="notes">
         </div>
     </div>
--->
+
     <div class="step slide">
         <h1>New SCION Data Flow</h1>
         <div class="img-container">
@@ -447,7 +442,7 @@
         <div class="notes">
         </div>
     </div>
-
+-->
     <div class="step slide">
         <h1 style="margin-top: 20%;">Thanks for your attention!</h1>
     
